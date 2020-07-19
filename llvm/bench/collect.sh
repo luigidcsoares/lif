@@ -2,6 +2,7 @@
 
 # We use the following scripts to collect statistics about each benchmark.
 source cachegrind.sh
+source measure.sh
 
 # Takes the an array of benhcmarks (paths) to be analyzed.
 collect::all() {
@@ -10,7 +11,7 @@ collect::all() {
         echo "Collecting data from ${bench}"
         cachegrind::run "$bench"
         cachegrind::filter "$bench"
-        echo "Generated cachegrind CSV file: ${bench}/results/cachegrind.csv"
+        # measure::time "$bench"
     done
     echo "Done"
 }

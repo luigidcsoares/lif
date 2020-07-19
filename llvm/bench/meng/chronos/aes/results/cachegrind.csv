@@ -1,0 +1,17 @@
+Src,Fn,Type,Ir,I1mr,ILmr,Dr,D1mr,DLmr,Dw,D1mw,DLmw
+main1.c,crypto_aes_expand_key,orig,2.667,314,314,255,87,87,291,58,58
+main1.c,crypto_aes_expand_key,orig-opt,2.451,297,297,225,112,112,385,134,133
+main1.c,crypto_aes_expand_key,isochr,5.103,622,622,960,725,723,587,201,201
+main1.c,crypto_aes_expand_key,isochr-opt,3.475,412,412,455,207,207,320,48,48
+main1.c,aes_encrypt,orig,1.094,151,151,451,244,244,253,28,28
+main1.c,aes_encrypt,orig-opt,1.156,162,162,362,314,314,241,98,97
+main1.c,aes_encrypt,isochr,1.279,185,185,447,301,301,252,33,33
+main1.c,aes_encrypt,isochr-opt,599,89,89,261,232,232,16,5,5
+main2.c,crypto_aes_expand_key,orig,2.667,314,314,255,87,87,291,59,59
+main2.c,crypto_aes_expand_key,orig-opt,2.451,297,297,225,112,112,385,134,133
+main2.c,crypto_aes_expand_key,isochr,5.103,622,622,960,723,721,587,201,201
+main2.c,crypto_aes_expand_key,isochr-opt,3.475,412,412,455,209,209,320,47,47
+main2.c,aes_encrypt,orig,1.094,151,151,451,244,244,253,24,24
+main2.c,aes_encrypt,orig-opt,1.156,162,162,362,310,310,241,92,91
+main2.c,aes_encrypt,isochr,1.279,185,185,447,296,296,252,32,32
+main2.c,aes_encrypt,isochr-opt,599,89,89,261,235,235,16,5,5

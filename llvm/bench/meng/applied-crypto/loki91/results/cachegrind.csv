@@ -1,0 +1,17 @@
+Src,Fn,Type,Ir,I1mr,ILmr,Dr,D1mr,DLmr,Dw,D1mw,DLmw
+main1.c,setlokikey,orig,78,7,7,4,2,2,17,2,2
+main1.c,setlokikey,orig-opt,78,7,7,4,1,1,17,2,2
+main1.c,setlokikey,isochr,76,7,7,3,1,1,17,2,2
+main1.c,setlokikey,isochr-opt,75,7,7,3,1,1,16,2,2
+main1.c,enloki,orig,102,25,25,26,18,18,26,3,3
+main1.c,enloki,orig-opt,102,25,25,26,19,19,26,4,4
+main1.c,enloki,isochr,117,28,28,25,19,19,25,3,3
+main1.c,enloki,isochr-opt,116,28,28,25,19,19,25,3,3
+main2.c,setlokikey,orig,78,7,7,4,2,2,17,2,2
+main2.c,setlokikey,orig-opt,78,7,7,4,1,1,17,2,2
+main2.c,setlokikey,isochr,76,7,7,3,1,1,17,2,2
+main2.c,setlokikey,isochr-opt,75,7,7,3,1,1,16,2,2
+main2.c,enloki,orig,102,25,25,26,18,18,26,3,3
+main2.c,enloki,orig-opt,102,25,25,26,19,19,26,4,4
+main2.c,enloki,isochr,117,28,28,25,19,19,25,3,3
+main2.c,enloki,isochr-opt,116,28,28,25,19,19,25,3,3
