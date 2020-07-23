@@ -55,7 +55,7 @@ using namespace cond;
 
 namespace isochronous {
 PreservedAnalyses Pass::run(Module &M, ModuleAnalysisManager &MAM) {
-    llvm::SmallVector<Function *, 32> Fns;
+    SmallVector<Function *, 32> Fns;
     for (Function &F : M)
         if (Names.find(F.getName()) != Names.end()) Fns.push_back(&F);
 
@@ -85,7 +85,7 @@ PreservedAnalyses Pass::run(Module &M, ModuleAnalysisManager &MAM) {
         for (auto V : GenV) Skip.insert(V);
 
         FuncWrapper *W = new FuncWrapper;
-        *W = {F, IsDerived, OutM, InM, Skip};
+        *W = {F, IsDerived, OutM, InM, Skip, ValueLenMap()};
 
         return W;
     };
@@ -98,7 +98,7 @@ PreservedAnalyses Pass::run(Module &M, ModuleAnalysisManager &MAM) {
     };
 
     // We mark all functions from the derived set as "Derived".
-    llvm::SmallVector<FuncWrapper *, 32> Wrapped;
+    SmallVector<FuncWrapper *, 32> Wrapped;
     for (auto F : Derived) {
         if (F->isDeclaration())
             WarnExternal(*F);
@@ -154,22 +154,24 @@ std::set<Function *> findDerived(Module &M, const std::set<Function *> Fns) {
 }
 
 // FIXME: Compute length of arrays inside structs.
-DenseMap<const Value *, Value *> computeLength(Function &F,
-                                               const TargetLibraryInfo *TLI) {
-    DenseMap<const Value *, Value *> LenM;
+ValueLenMap computeLen(Function &F, const TargetLibraryInfo *TLI) {
+    ValueLenMap LenM;
     auto DL = F.getParent()->getDataLayout();
     auto Int64Ty = IntegerType::getInt64Ty(F.getContext());
 
     // Helper function to early propagate the length to users of arguments or
     // globals.
     auto Propagate = [&](Value *V) {
-        for (auto U : V->users())
-            if (isa<PointerType>(U->getType())) LenM[U] = LenM[V];
+        for (auto U : V->users()) {
+            if (isa<PointerType>(U->getType())) LenM.insert({U, LenM[V]});
+        }
     };
 
     // We first compute the length of the pointer arguments. This is quite
     // simple, since we require each pointer to be immediately followed by its
-    // length. TODO: get the length from annotations.
+    // length.
+    // TODO: get the length from annotations.
+    // FIXME: what about structs containing pointers?
     for (auto Iter = F.arg_begin(); Iter != F.arg_end(); ++Iter) {
         Value *V = &*Iter;
         if (!isa<PointerType>(V->getType())) continue;
@@ -178,9 +180,16 @@ DenseMap<const Value *, Value *> computeLength(Function &F,
         assert(isa<IntegerType>(Len->getType()) &&
                "pointer argument must be followed by its length!");
 
-        LenM[V] = Len;
+        ValueLen VLen = {ValueLen::DirectLen({Len})};
+        LenM[V] = std::make_shared<ValueLen>(VLen);
         Propagate(V);
     }
+
+    // Auxiliar function that we use to transform the number of elements of an
+    // array to llvm::Value.
+    auto DimensionAsValue = [&Int64Ty](auto ArrTy) {
+        return ConstantInt::get(Int64Ty, ArrTy->getNumElements());
+    };
 
     // Then we compute the length of all global values.
     for (Value &Global : F.getParent()->globals()) {
@@ -189,17 +198,24 @@ DenseMap<const Value *, Value *> computeLength(Function &F,
         auto PtrTy = dyn_cast<PointerType>(Global.getType());
         if (!PtrTy) continue;
 
-        Value *Len = ConstantInt::get(Int64Ty, 1);
+        auto VLen = std::make_shared<ValueLen>();
         auto ArrTy = dyn_cast<ArrayType>(PtrTy->getElementType());
 
         if (ArrTy) {
-            auto NumElems = ArrTy->getNumElements();
+            ValueLen::DirectLen ArrayLen;
+            ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+            // Walks through the elements pointed by ArrTy in case we're
+            // dealing with a multidimensional array.
             while ((ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType())))
-                NumElems *= ArrTy->getNumElements();
-            Len = ConstantInt::get(Int64Ty, NumElems);
+                ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+            VLen->Len = ArrayLen;
+        } else {
+            VLen->Len = ValueLen::DirectLen({ConstantInt::get(Int64Ty, 1)});
         }
 
-        LenM[&Global] = Len;
+        LenM[&Global] = VLen;
         Propagate(&Global);
     }
 
@@ -273,7 +289,8 @@ DenseMap<const Value *, Value *> computeLength(Function &F,
                                                   Phi->getNextNode());
 
                     PhiM[PhiLen] = Incs;
-                    LenM[Phi] = PhiLen;
+                    ValueLen VLen = {ValueLen::DirectLen({PhiLen})};
+                    LenM[Phi] = std::make_shared<ValueLen>(VLen);
                     Cached = true;
                     break;
                 }
@@ -290,49 +307,63 @@ DenseMap<const Value *, Value *> computeLength(Function &F,
                 }
             }
 
-            Value *Len;
+            auto VLen = std::make_shared<ValueLen>();
             // Hell yeah! No need to compute again!
-            if (Cached) Len = LenM[Ptr];
+            if (Cached) VLen = LenM[Ptr];
 
             // We're lucky! It is a GEP and the type is an array.
             else if (auto GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
                 auto ArrTy = cast<ArrayType>(GEP->getPointerOperandType());
-                auto NumElems = ArrTy->getNumElements();
+                ValueLen::DirectLen ArrayLen;
+                ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+                // Walks through the elements pointed by ArrTy in case we're
+                // dealing with a multidimensional array.
                 while ((ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType())))
-                    NumElems *= ArrTy->getNumElements();
-                Len = ConstantInt::get(Int64Ty, NumElems);
+                    ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+                VLen->Len = ArrayLen;
             }
 
             // Okay, not a GEP. Perhaps an alloca?
             else if (auto Alloca = dyn_cast<AllocaInst>(Ptr)) {
                 auto ArrTy = dyn_cast<ArrayType>(Alloca->getAllocatedType());
                 if (ArrTy && !Alloca->isArrayAllocation()) {
-                    auto NumElems = ArrTy->getNumElements();
+                    ValueLen::DirectLen ArrayLen;
+                    ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+                    // Walks through the elements pointed by ArrTy in case we're
+                    // dealing with a multidimensional array.
                     while (
                         (ArrTy = dyn_cast<ArrayType>(ArrTy->getElementType())))
-                        NumElems *= ArrTy->getNumElements();
-                    Len = ConstantInt::get(Int64Ty, NumElems);
+                        ArrayLen.push_back(DimensionAsValue(ArrTy));
+
+                    VLen->Len = ArrayLen;
                 } else {
-                    Len = Alloca->getArraySize();
+                    VLen->Len = ValueLen::DirectLen({Alloca->getArraySize()});
                 }
             }
 
             // Nothing yet... so it has to be a malloc call!
             else {
                 auto Call = cast<CallInst>(Ptr);
-                Len = getMallocArraySize(Call, DL, TLI);
+                VLen->Len =
+                    ValueLen::DirectLen({getMallocArraySize(Call, DL, TLI)});
             }
 
             while (!Ptrs.empty()) {
-                LenM[Ptrs.top()] = Len;
+                LenM[Ptrs.top()] = VLen;
                 Ptrs.pop();
             }
         }
     }
 
     // Finally, we fill the gaps of the phi nodes that we've created.
+    // In case of phis, we know that its length will be represented as another
+    // phi node, so its a DirectLen of size 1.
     for (auto [Phi, IncV] : PhiM)
-        for (auto [BB, V] : IncV) Phi->addIncoming(LenM[V], BB);
+        for (auto [BB, V] : IncV)
+            Phi->addIncoming(std::get<0>(LenM[V]->Len)[0], BB);
 
     return LenM;
 }
@@ -350,15 +381,15 @@ void prepareModule(Module &M, SmallVectorImpl<FuncWrapper *> &Fns,
         return &FAM.getResult<TargetLibraryAnalysis>(F);
     };
 
-    llvm::SmallVector<Function *, 16> Modified;
-    DenseMap<Function *, DenseMap<const llvm::Value *, Value *>> FLenM;
+    SmallVector<Function *, 16> Modified;
+    DenseMap<Function *, ValueLenMap> FLenM;
     DenseMap<Function *, Function *> Replace;
 
     LLVMContext &Ctx = M.getContext();
 
     // We modify all functions from M, not only the ones that will be
     // transformed to isochronous, because we need the length arguments to
-    // "computeLength" work.
+    // "computeLen" work.
     for (Function &F : M) {
         if (F.isDeclaration()) continue;
 
@@ -398,7 +429,7 @@ void prepareModule(Module &M, SmallVectorImpl<FuncWrapper *> &Fns,
         // function if it is marked as derived. Else, we just move to the next
         // func.
         if (NumPtrArgs == 0 && !IsDerived) {
-            FLenM[&F] = computeLength(F, GetTLI(F));
+            FLenM[&F] = computeLen(F, GetTLI(F));
             continue;
         }
 
@@ -452,12 +483,14 @@ void prepareModule(Module &M, SmallVectorImpl<FuncWrapper *> &Fns,
         }
 
         Replace[&F] = NewF;
-        FLenM[NewF] = computeLength(*NewF, GetTLI(*NewF));
+        FLenM[NewF] = computeLen(*NewF, GetTLI(*NewF));
 
-        // Update the pointer to F to point to the new function we just create.
         if (IdxIter != TransformIdx.end()) {
+            // Update the pointer to F to point to the new fn we just create.
             TransformIdx[NewF] = IdxIter->second;
             Fns[IdxIter->second]->F = NewF;
+            // Set the ValueLenMap so we avoid recomputing it later on.
+            Fns[IdxIter->second]->LenM = FLenM[NewF];
         }
     }
 
@@ -492,7 +525,9 @@ void prepareModule(Module &M, SmallVectorImpl<FuncWrapper *> &Fns,
 
                 if (!isa<PointerType>(Arg->getType())) continue;
 
-                auto Len = FLenM[CS.getCaller()][Arg];
+                // We're dealing with pointers here, and the length of pointers
+                // are stores as DirectLen with size 1.
+                auto Len = std::get<0>(FLenM[CS.getCaller()][Arg]->Len)[0];
                 auto LenArgTy = (NewF->arg_begin() + Idx)->getType();
 
                 if (Len->getType()->getScalarSizeInBits() <
@@ -561,7 +596,7 @@ void prepareFunc(Function &F) {
 }
 
 void transformFunc(const FuncWrapper &W, FunctionAnalysisManager &FAM) {
-    auto [F, _1, OutM, InM, Skip] = W;
+    auto [F, _1, OutM, InM, Skip, LenM] = W;
 
     // We currently cannot handle functions with cycles.
     SmallVector<std::pair<const BasicBlock *, const BasicBlock *>, 32> Result;
@@ -573,10 +608,6 @@ void transformFunc(const FuncWrapper &W, FunctionAnalysisManager &FAM) {
                   "-loop-unroll -unroll-count=N')\n";
         return;
     }
-
-    // Get the length associated with each pointer (either local or
-    // argument).
-    auto LenM = computeLength(*F, &FAM.getResult<TargetLibraryAnalysis>(*F));
 
     // Initialize Shadow memory as a pointer to an integer. We use
     // MaxPointerSize to ensure absence of overflow.
@@ -611,10 +642,10 @@ void transformFunc(const FuncWrapper &W, FunctionAnalysisManager &FAM) {
 
             if (auto Load = dyn_cast<LoadInst>(&I)) {
                 auto PtrLen = LenM[Load->getPointerOperand()];
-                transformLoad(*Load, Shadow, PtrLen, OutCond);
+                transformLoad(*Load, Shadow, *PtrLen, OutCond);
             } else if (auto Store = dyn_cast<StoreInst>(&I)) {
                 auto PtrLen = LenM[Store->getPointerOperand()];
-                transformStore(*Store, Shadow, PtrLen, OutCond);
+                transformStore(*Store, Shadow, *PtrLen, OutCond);
             }
         }
 
@@ -661,7 +692,7 @@ void transformPhi(PHINode &Phi, const SmallVectorImpl<Incoming> &InV) {
     Phi.eraseFromParent();
 }
 
-void transformLoad(LoadInst &Load, AllocaInst *Shadow, Value *PtrLen,
+void transformLoad(LoadInst &Load, AllocaInst *Shadow, const ValueLen &PtrLen,
                    Value *Cond) {
     // The pointer operand may be a GEP in the form of a ConstantExpr. In this
     // case, we transform it into a GEP instruction so we can handle easier.
@@ -677,8 +708,8 @@ void transformLoad(LoadInst &Load, AllocaInst *Shadow, Value *PtrLen,
                         transformGEP(GEP, Shadow, PtrLen, Cond, &Load));
 }
 
-void transformStore(StoreInst &Store, AllocaInst *Shadow, Value *PtrLen,
-                    Value *Cond) {
+void transformStore(StoreInst &Store, AllocaInst *Shadow,
+                    const ValueLen &PtrLen, Value *Cond) {
     // Let addr' be either the original addr accessed by Store or the addr
     // got after transforming a GEP inst. Let val' be either val or
     // Load(addr'), according to the incoming conditions. Replace Store(val,
@@ -701,8 +732,8 @@ void transformStore(StoreInst &Store, AllocaInst *Shadow, Value *PtrLen,
     Store.setOperand(0, SelectVal);
 }
 
-Value *transformGEP(GetElementPtrInst *GEP, AllocaInst *Shadow, Value *PtrLen,
-                    Value *Cond, Instruction *Before) {
+Value *transformGEP(GetElementPtrInst *GEP, AllocaInst *Shadow,
+                    const ValueLen &PtrLen, Value *Cond, Instruction *Before) {
     // If GEP operand pointer is of an array type, it may be a multidimensional
     // array so we need to compute the actual index.
     //
@@ -717,7 +748,7 @@ Value *transformGEP(GetElementPtrInst *GEP, AllocaInst *Shadow, Value *PtrLen,
     // related to the array, so in this case it would be 3 as well.
     //
     // TODO: We can simplify this code if we change the behavior of
-    // computeLength for multidimensional arrays (and structs). Instead of
+    // computeLen for multidimensional arrays (and structs). Instead of
     // computing a single value, we can store a list of lengths (e.g. a matrix
     // [3][3] would be stored as two lengths [3, 3]). This way, we already know
     // how much operand indices we need to aggregate (in case we're explicit
@@ -775,9 +806,13 @@ Value *transformGEP(GetElementPtrInst *GEP, AllocaInst *Shadow, Value *PtrLen,
         }
     }
 
-    MatchType(Idx, PtrLen);
+    // FIXME: PtrLen.Len won't always be of type DirectLen. We need to
+    // reformulate this whole memory-safety step to fit into the new way of
+    // computing a type's length.
+    auto Len = std::get<0>(PtrLen.Len)[0];
+    MatchType(Idx, Len);
     auto IsSafe = ICmpInst::Create(Instruction::ICmp, ICmpInst::ICMP_SLT, Idx,
-                                   PtrLen, "", Before);
+                                   Len, "", Before);
 
     // Check if (i) the incoming condition is true OR (ii) the access to the
     // original array at Idx is safe. If (i), we execute the original
@@ -793,6 +828,6 @@ Value *transformGEP(GetElementPtrInst *GEP, AllocaInst *Shadow, Value *PtrLen,
 }
 
 Value *ctsel(Value *Cond, Value *VTrue, Value *VFalse, Instruction *Before) {
-    return llvm::SelectInst::Create(Cond, VTrue, VFalse, "", Before);
+    return SelectInst::Create(Cond, VTrue, VFalse, "", Before);
 }
 } // namespace isochronous
